@@ -1,56 +1,97 @@
+# Daniel C. P. Câmara
+# AI app designed to help busy researchers go through their crescent number of unread papers.
+
+# LIBRARIES AND SETUP
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_openai import ChatOpenAI
+from langchain.chains.llm import LLMChain
+from langchain_core.prompts import PromptTemplate
+from langchain.chains.combine_documents.stuff import StuffDocumentsChain
+from langchain.chains.summarize import load_summarize_chain
+
 import streamlit as st
-from openai import OpenAI
+import os
+from tempfile import NamedTemporaryFile
 
-# Show title and description.
-st.title("💬 Chatbot")
-st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
-)
+# Função para carregar a chave da API e armazenar no session_state
+def load_api_key():
+    if "api_key" not in st.session_state:
+        api_key = st.text_input("Insira sua chave da API OpenAI", type="password")
+        if st.button("Salvar chave"):
+            if api_key:
+                st.session_state["api_key"] = api_key
+                st.success("Chave da API salva!")
+            else:
+                st.error("Por favor, insira uma chave válida.")
+    return st.session_state.get("api_key", None)
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
-else:
+# 1.0 FUNÇÃO PARA CARREGAR E RESUMIR PDF
+def load_summarize(file, api_key):
+    with NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(file.getvalue())
+        file_path = tmp.name
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
-
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
-
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
+    try:
+        loader = PyPDFLoader(file_path)
+        docs = loader.load()
+        model = ChatOpenAI(
+            model="gpt-4o-mini", 
+            temperature=0, 
+            api_key=api_key
         )
+        
+        prompt_template = """
+        You are a helpful research assistant. You are specialized in public health, epidemiology of transmissible diseases, and epidemiology of non-transmissible diseases. Write a report from the following peer-reviewed scientific paper:
+        {paper}
+        
+        Use the following Markdown format:
+        # Abstract
+        Begin the section with the full title of the paper followed by the full name of the first author. If there is more than one author, mention them as colleagues. Then, copy and paste the abstract without changing a single word.
+        
+        ## Introduction
+        Use 3 to 7 numbered bullet points
+        
+        ## Methodology
+        Describe the whole methodology section, including statistical analysis and statistical modelling if available. Use 3 to 10 numbered bullet points.
+        
+        ## Results
+        Describe the main findings of the paper. Use 3 to 10 numbered bullets.
+        
+        ## Discussion and conclusions
+        Read and summarize the most important points in the discussion section. Conclude with any future steps that the authors might discuss. Use 3 to 10 numbered bullets. 
+        
+        ## Most cited papers
+        Finish with 1 to 5 numbered bullet points showing the most cited references in the paper.
+        """
+        
+        prompt = PromptTemplate(input_variables=["paper"], template=prompt_template)
+        llm_chain = LLMChain(prompt=prompt, llm=model)
+        stuff_chain = StuffDocumentsChain(llm_chain=llm_chain, document_variable_name="paper")
+        response = stuff_chain.invoke(docs)
 
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+    finally:
+        os.remove(file_path)
+
+    return response["output_text"]
+
+# 2.0 INTERFACE DO STREAMLIT
+st.title("Busy Scientist App")
+st.subheader("Carregue um documento PDF:")
+
+# Carregar chave da API e salvar no session_state
+api_key = load_api_key()
+
+# Se a chave for carregada, rodar o restante do app
+if api_key:
+    uploaded_file = st.file_uploader("Escolha um arquivo PDF", type="pdf")
+
+    if uploaded_file is not None:
+        if st.button("Resumir o artigo"):
+            with st.spinner("Resumindo..."):
+                summary = load_summarize(uploaded_file, api_key)
+                st.subheader("Resultados da Resumização:")
+                st.markdown(summary)
+    else:
+        st.write("Nenhum arquivo carregado. Por favor, carregue um arquivo PDF.")
+else:
+    st.write("Por favor, insira sua chave da API para continuar.")
